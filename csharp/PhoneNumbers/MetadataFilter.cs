@@ -29,7 +29,7 @@ namespace PhoneNumbers
     /// changes without notice. Any changes are not guaranteed to be reflected in the versioning scheme
     /// of the public API, nor in release notes.
     /// </summary>
-    public class MetadataFilter
+    public sealed class MetadataFilter
     {
         // The following 3 sets comprise all the PhoneMetadata fields as defined at phonemetadata.proto
         // which may be excluded from customized serializations of the binary metadata. Fields that are
@@ -107,14 +107,14 @@ namespace PhoneNumbers
         public override bool Equals(object obj)
 #endif
         {
-            if (obj == null)
+            if (obj is not MetadataFilter other)
             {
                 return false;
             }
 
-            return blacklist.Count == ((MetadataFilter)obj)?.blacklist?.Count &&
+            return blacklist.Count == other.blacklist.Count &&
                    blacklist.All(kvp =>
-                       ((MetadataFilter)obj).blacklist.TryGetValue(kvp.Key, out var value2) && kvp.Value.SetEquals(value2));
+                       other.blacklist.TryGetValue(kvp.Key, out var value2) && kvp.Value.SetEquals(value2));
         }
 
         public override int GetHashCode()
@@ -263,20 +263,20 @@ namespace PhoneNumbers
             }
 
             foreach (var wildcardChild in wildcardChildren)
-			{
-				foreach (var parent in ExcludableParentFields)
-				{
-					if (!fieldMap.TryGetValue(parent, out var children))
-					{
-						children = new SortedSet<string>();
-						fieldMap.Add(parent, children);
-					}
-					if (!children.Add(wildcardChild)
-						&& children.Count != ExcludableChildFields.Count)
-						throw new Exception(
-							wildcardChild + " is present by itself so remove it from " + parent + "'s group");
-				}
-			}
+            {
+                foreach (var parent in ExcludableParentFields)
+                {
+                    if (!fieldMap.TryGetValue(parent, out var children))
+                    {
+                        children = new SortedSet<string>();
+                        fieldMap.Add(parent, children);
+                    }
+                    if (!children.Add(wildcardChild)
+                        && children.Count != ExcludableChildFields.Count)
+                        throw new Exception(
+                            wildcardChild + " is present by itself so remove it from " + parent + "'s group");
+                }
+            }
 
             return fieldMap;
         }
@@ -299,16 +299,12 @@ namespace PhoneNumbers
                     // parent as a key.
                     if (otherChildren.Count != ExcludableChildFields.Count)
                     {
-                        var children = new SortedSet<string>();
-                        foreach (var child in ExcludableChildFields)
-                            if (!otherChildren.Contains(child))
-                                children.Add(child);
+                        var children = new SortedSet<string>(ExcludableChildFields.Where(child => !otherChildren.Contains(child)));
                         complement.Add(parent, children);
                     }
                 }
-            foreach (var childlessField in ExcludableChildlessFields)
-                if (!fieldMap.ContainsKey(childlessField))
-                    complement.Add(childlessField, new SortedSet<string>());
+            foreach (var childlessField in ExcludableChildlessFields.Where(f => !fieldMap.ContainsKey(f)))
+                complement.Add(childlessField, new SortedSet<string>());
             return complement;
         }
 
@@ -318,7 +314,7 @@ namespace PhoneNumbers
                 throw new Exception(parent + " is not an excludable parent field");
             if (!ExcludableChildFields.Contains(child))
                 throw new Exception(child + " is not an excludable child field");
-            return blacklist.ContainsKey(parent) && blacklist[parent].Contains(child);
+            return blacklist.TryGetValue(parent, out var children) && children.Contains(child);
         }
 
         internal bool ShouldDrop(string childlessField)

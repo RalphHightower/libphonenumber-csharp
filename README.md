@@ -16,6 +16,8 @@ See [this](csharp/README.md) for details about the port.
 
 Phone number metadata is updated in the Google repo approximately every two weeks. This library is automatically updated by a [scheduled github action](https://github.com/twcclegg/libphonenumber-csharp/actions/workflows/create_new_release_on_new_metadata_update.yml) to include the latest metadata, usually within a day. See [Metadata updates](#metadata-updates) for how that works and how to run it manually.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Installation
 
 Run the following command to add this library to your project
@@ -169,16 +171,6 @@ Therefore, we recommend you keep this nuget package as up to date as possible us
 
 For more information on metadata usage, please refer to the [main repository faq](https://github.com/google/libphonenumber/blob/master/FAQ.md#metadata)
 
-## ToDo
-
-* update / add / port new unit tests and logging from java source
-
-## How to unfold automatic generated files
-
-* Install Jetbrains - Resharper for Visual Studio
-* File by file, right click and "Cleanup code"
-* Check the unfolded file
-
 ## Running tests locally
 
 ```bash
@@ -195,7 +187,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the build settings that will fail CI 
 
 ## Metadata updates
 
-The [`create_new_release_on_new_metadata_update`](https://github.com/twcclegg/libphonenumber-csharp/actions/workflows/create_new_release_on_new_metadata_update.yml) workflow runs daily and drives [`lib/github-actions-metadata-update.sh`](lib/github-actions-metadata-update.sh). When the latest `google/libphonenumber` release is newer than the published NuGet package, it copies the upstream `resources/`, regenerates `resources/locale/country_names.txt`, builds and tests, then commits, pushes and creates a matching GitHub release.
+The [`create_new_release_on_new_metadata_update`](https://github.com/twcclegg/libphonenumber-csharp/actions/workflows/create_new_release_on_new_metadata_update.yml) workflow runs daily and drives [`lib/github-actions-metadata-update.sh`](lib/github-actions-metadata-update.sh). When the latest `google/libphonenumber` release is newer than the published NuGet package, it copies the upstream `resources/`, regenerates `resources/locale/country_names.txt`, adds a [CHANGELOG.md](CHANGELOG.md) entry for the release, then commits, pushes to a `metadata-update/*` branch and opens a PR against `main` with auto-merge enabled. The push and PR authenticate as the dedicated `libphonenumber-csharp-bot` account (via the `BOT_ACCESS_TOKEN` secret) rather than the default `GITHUB_TOKEN`, since GitHub requires a maintainer to manually approve workflow runs on PRs opened with `GITHUB_TOKEN`. Once that PR's required checks pass and it merges, [`finalize_metadata_release`](https://github.com/twcclegg/libphonenumber-csharp/actions/workflows/finalize_metadata_release.yml) tags the merge commit, creates a matching GitHub release, and dispatches the NuGet publish. The changelog entry is written in the same PR rather than afterwards: `main`'s branch-protection ruleset requires every push to go through a PR with no bypass for any actor (including this automation's own bot account), so `finalize_metadata_release` — which only tags an existing commit and calls the Releases API — has no way to push a follow-up commit of its own. The version number is already known at PR-open time (it's copied straight from the upstream tag), so there's nothing to guess.
 
 Before doing any of that it inspects the upstream diff and stops if it contains `.java` or `.proto` files, because changes to the Java sources may need porting by hand and an unattended metadata bump would silently skip them.
 
@@ -235,6 +227,10 @@ UPSTREAM_TAG=v9.0.33 DEPLOYED_VERSION=9.0.32 \
 ### Running it against a fork
 
 Nothing about the target repository is hard-coded. The script commits and pushes through whatever checkout it runs in, and takes the repository to release from `GITHUB_REPOSITORY` — set automatically by GitHub Actions, and otherwise derived from the `origin` remote. So a fork releases to itself, and the dry-run summary names the repository it would publish to. `UPSTREAM_REPOSITORY` (default `google/libphonenumber`) and `NUGET_PACKAGE_ID` (default `libphonenumber-csharp`) are overridable the same way.
+
+### Automated triage of metadata issues
+
+A large share of the issues filed here turn out to be reports about Google's phone number metadata itself (an unrecognized prefix, an outdated numbering plan) rather than a bug in this port's code — see the checklist in [`bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md). The [`triage_metadata_issues`](.github/workflows/triage_metadata_issues.yml) workflow uses the GitHub Copilot CLI, grounded in [`.github/triage/metadata_examples.md`](.github/triage/metadata_examples.md), to spot these on issue creation, closes them with a comment pointing to [google/libphonenumber](https://github.com/google/libphonenumber), and labels them `metadata`. Every closure appends to that examples file, so the classifier keeps learning from real outcomes instead of drifting from a fixed prompt.
 
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md)

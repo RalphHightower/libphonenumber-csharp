@@ -27,7 +27,7 @@ namespace PhoneNumbers
     /// number portability the number might not belong to the returned carrier anymore.
     /// </para>
     /// </summary>
-    public class PhoneNumberToCarrierMapper
+    public sealed class PhoneNumberToCarrierMapper
     {
         // Corresponds to resources/carrier/ embedded with LinkBase="carrier".
         private const string MAPPING_DATA_DIRECTORY = "carrier.";
@@ -105,8 +105,8 @@ namespace PhoneNumbers
         }
 
         private static bool IsMobile(PhoneNumberType numberType) =>
-            numberType == PhoneNumberType.MOBILE
-            || numberType == PhoneNumberType.FIXED_LINE_OR_MOBILE
-            || numberType == PhoneNumberType.PAGER;
+            numberType is PhoneNumberType.MOBILE
+                or PhoneNumberType.FIXED_LINE_OR_MOBILE
+                or PhoneNumberType.PAGER;
     }
 }

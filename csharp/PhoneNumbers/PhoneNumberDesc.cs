@@ -30,7 +30,7 @@ namespace PhoneNumbers
 
         public PhoneNumberDesc DefaultInstanceForType => DefaultInstance;
 
-        public bool HasNationalNumberPattern => _nationalNumberPattern != null;
+        public bool HasNationalNumberPattern => _nationalNumberPattern is not null;
 
         private string _nationalNumberPattern;
         public string NationalNumberPattern
@@ -132,7 +132,7 @@ namespace PhoneNumbers
 
             public PhoneNumberDesc BuildPartial()
             {
-                if (MessageBeingBuilt == null)
+                if (MessageBeingBuilt is null)
                     throw new InvalidOperationException("build() has already been called on this Builder");
 
 
@@ -155,7 +155,7 @@ namespace PhoneNumbers
 
             public Builder SetNationalNumberPattern(string value)
             {
-                if (value == null) throw new ArgumentNullException(nameof(value));
+                if (value is null) throw new ArgumentNullException(nameof(value));
                 MessageBeingBuilt.NationalNumberPattern = value;
                 return this;
             }
@@ -226,7 +226,7 @@ namespace PhoneNumbers
 
             public Builder SetExampleNumber(string value)
             {
-                if (value == null) throw new ArgumentNullException(nameof(value));
+                if (value is null) throw new ArgumentNullException(nameof(value));
                 MessageBeingBuilt.ExampleNumber = value;
                 return this;
             }
@@ -246,8 +246,8 @@ namespace PhoneNumbers
             var hash = GetType().GetHashCode();
             if (HasNationalNumberPattern) hash ^= NationalNumberPattern.GetHashCode();
 
-            hash = possibleLength_.Aggregate(hash, (current, i) => current ^ i.GetHashCode());
-            hash = possibleLengthLocalOnly_.Aggregate(hash, (current, i) => current ^ i.GetHashCode());
+            hash = possibleLength_.Aggregate(hash, (current, i) => current ^ i);
+            hash = possibleLengthLocalOnly_.Aggregate(hash, (current, i) => current ^ i);
 
             if (HasExampleNumber) hash ^= ExampleNumber.GetHashCode();
             return hash;
@@ -255,8 +255,8 @@ namespace PhoneNumbers
 
         public override bool Equals(object obj)
         {
-            var other = obj as PhoneNumberDesc;
-            if (HasNationalNumberPattern != other?.HasNationalNumberPattern || HasNationalNumberPattern &&
+            if (obj is not PhoneNumberDesc other) return false;
+            if (HasNationalNumberPattern != other.HasNationalNumberPattern || HasNationalNumberPattern &&
                 !NationalNumberPattern.Equals(other.NationalNumberPattern)) return false;
             if (possibleLength_.Count != other.possibleLength_.Count) return false;
             for (var ix = 0; ix < possibleLength_.Count; ix++)

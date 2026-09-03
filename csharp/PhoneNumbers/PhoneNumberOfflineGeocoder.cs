@@ -17,6 +17,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 
 namespace PhoneNumbers
@@ -92,7 +93,7 @@ namespace PhoneNumbers
     /// files generated at build time by <c>PhoneNumbers.MetadataBuilder</c>, via
     /// <see cref="PrefixFileReader"/>.
     /// </remarks>
-    public class PhoneNumberOfflineGeocoder
+    public sealed class PhoneNumberOfflineGeocoder
     {
         private static PhoneNumberOfflineGeocoder instance;
         private const string MAPPING_DATA_DIRECTORY = "geocoding.";
@@ -118,7 +119,7 @@ namespace PhoneNumbers
         {
             lock (ThisLock)
             {
-                return instance ?? (instance = new PhoneNumberOfflineGeocoder(MAPPING_DATA_DIRECTORY));
+                return instance ??= new PhoneNumberOfflineGeocoder(MAPPING_DATA_DIRECTORY);
             }
         }
 
@@ -146,19 +147,15 @@ namespace PhoneNumbers
             {
                 return GetRegionDisplayName(regionCodes[0], language);
             }
-            var regionWhereNumberIsValid = "ZZ";
-            foreach (var regionCode in regionCodes)
-            {
-                if (phoneUtil.IsValidNumberForRegion(number, regionCode))
-                {
-                    // If the number has already been found valid for one region, then we don't know
-                    // which region it belongs to so we return nothing.
-                    if (!regionWhereNumberIsValid.Equals("ZZ"))
-                        return "";
-                    regionWhereNumberIsValid = regionCode;
-                }
-            }
-            return GetRegionDisplayName(regionWhereNumberIsValid, language);
+            // Take(2): once a second valid region turns up we already know the answer (below), so
+            // there's no need to keep testing the rest.
+            var validRegions = regionCodes.Where(regionCode => phoneUtil.IsValidNumberForRegion(number, regionCode))
+                .Take(2).ToList();
+            // If the number is valid for more than one region, we don't know which region it belongs
+            // to so we return nothing.
+            if (validRegions.Count > 1)
+                return "";
+            return GetRegionDisplayName(validRegions.Count == 1 ? validRegions[0] : "ZZ", language);
         }
 
         /// <summary>
@@ -166,8 +163,7 @@ namespace PhoneNumbers
         /// </summary>
         private static string GetRegionDisplayName(string regionCode, Locale language)
         {
-            return regionCode == null || regionCode.Equals("ZZ") ||
-                   regionCode.Equals(PhoneNumberUtil.REGION_CODE_FOR_NON_GEO_ENTITY)
+            return regionCode is null or "ZZ" or PhoneNumberUtil.REGION_CODE_FOR_NON_GEO_ENTITY
                 ? ""
                 : new Locale("", regionCode).GetDisplayCountry(language.Language);
         }
@@ -248,7 +244,7 @@ namespace PhoneNumbers
             // description, if one exists - if no description exists, we will show the region(country) name
             // for the number.
             var regionCode = phoneUtil.GetRegionCodeForNumber(number);
-            if (userRegion.Equals(regionCode))
+            if (userRegion == regionCode)
             {
                 return GetDescriptionForValidNumber(number, languageCode);
             }

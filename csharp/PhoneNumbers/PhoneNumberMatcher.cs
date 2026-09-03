@@ -218,7 +218,7 @@ namespace PhoneNumbers
             if (!char.IsLetter(letter) && CharUnicodeInfo.GetUnicodeCategory(letter) != UnicodeCategory.NonSpacingMark)
                 return false;
             return
-                letter >= 0x0000 && letter <= 0x007F        // BASIC_LATIN
+                letter <= 0x007F                             // BASIC_LATIN
                 || letter >= 0x0080 && letter <= 0x00FF     // LATIN_1_SUPPLEMENT
                 || letter >= 0x0100 && letter <= 0x017F     // LATIN_EXTENDED_A
                 || letter >= 0x1E00 && letter <= 0x1EFF     // LATIN_EXTENDED_ADDITIONAL
@@ -343,7 +343,7 @@ namespace PhoneNumbers
                     }
                     var withoutLastGroup = candidate.Substring(0, lastGroupStart);
                     withoutLastGroup = TrimAfterUnwantedChars(withoutLastGroup);
-                    if (withoutLastGroup.Equals(firstGroupOnly))
+                    if (withoutLastGroup == firstGroupOnly)
                     {
                         // If there are only two groups, then the group "without the last group" is the same as
                         // the first group. In these cases, we don't want to re-check the number group, so we exit
@@ -443,6 +443,12 @@ namespace PhoneNumbers
         {
             var fromIndex = 0;
             var candidate = normalizedCandidate.ToString();
+            if (number.CountryCodeSource != PhoneNumber.Types.CountryCodeSource.FROM_DEFAULT_COUNTRY)
+            {
+                // First skip the country code if the normalized candidate contained it.
+                var countryCode = number.CountryCode.ToString(CultureInfo.InvariantCulture);
+                fromIndex = candidate.IndexOf(countryCode, StringComparison.Ordinal) + countryCode.Length;
+            }
             // Check each group of consecutive digits are not broken into separate groupings in the
             // normalizedCandidate string.
             for (var i = 0; i < formattedNumberGroups.Count; i++)
@@ -458,8 +464,12 @@ namespace PhoneNumbers
                 fromIndex += formattedNumberGroups[i].Length;
                 if (i == 0 && fromIndex < candidate.Length)
                 {
-                    // We are at the position right after the NDC.
-                    if (char.IsDigit(candidate[fromIndex]))
+                    // We are at the position right after the NDC. We get the region used for formatting
+                    // information based on the country code in the phone number, rather than the number
+                    // itself, as we do not need to distinguish between different countries with the same
+                    // country calling code and this is faster.
+                    var region = util.GetRegionCodeForCountryCode(number.CountryCode);
+                    if (util.GetNddPrefixForRegion(region, true) != null && char.IsDigit(candidate[fromIndex]))
                     {
                         // This means there is no formatting symbol after the NDC. In this case, we only
                         // accept the number if there is no formatting symbol at all in the number, except
@@ -503,8 +513,8 @@ namespace PhoneNumbers
                 formattedNumberGroupIndex > 0 && candidateNumberGroupIndex >= 0;
                 formattedNumberGroupIndex--, candidateNumberGroupIndex--)
             {
-                if (!candidateGroups[candidateNumberGroupIndex].Equals(
-                    formattedNumberGroups[formattedNumberGroupIndex]))
+                if (candidateGroups[candidateNumberGroupIndex] !=
+                    formattedNumberGroups[formattedNumberGroupIndex])
                 {
                     return false;
                 }
@@ -520,14 +530,16 @@ namespace PhoneNumbers
         /// prefix, and return it as a set of digit blocks that would be formatted together following
         /// standard formatting rules.
         /// </summary>
-        private static IList<string> GetNationalNumberGroups(PhoneNumberUtil util, PhoneNumber number) {
+        private static IList<string> GetNationalNumberGroups(PhoneNumberUtil util, PhoneNumber number)
+        {
             // This will be in the format +CC-DG1-DG2-DGX;ext=EXT where DG1..DGX represents groups of
             // digits.
             var rfc3966Format = util.Format(number, PhoneNumberFormat.RFC3966);
             // We remove the extension part from the formatted string before splitting it into different
             // groups.
             var endIndex = rfc3966Format.IndexOf(';');
-            if (endIndex < 0) {
+            if (endIndex < 0)
+            {
                 endIndex = rfc3966Format.Length;
             }
             // The country-code will have a '-' following it.
@@ -592,11 +604,13 @@ namespace PhoneNumbers
             {
                 foreach (var alternateFormat in alternateFormats.numberFormat_)
                 {
-                    if (alternateFormat.LeadingDigitsPatternCount > 0) {
+                    if (alternateFormat.LeadingDigitsPatternCount > 0)
+                    {
                         // There is only one leading digits pattern for alternate formats.
                         var pattern =
                             PhoneRegex.Get(alternateFormat.GetLeadingDigitsPattern(0));
-                        if (!pattern.IsMatchBeginning(nationalSignificantNumber)) {
+                        if (!pattern.IsMatchBeginning(nationalSignificantNumber))
+                        {
                             // Leading digits don't match; try another one.
                             continue;
                         }
@@ -611,10 +625,49 @@ namespace PhoneNumbers
             return false;
         }
 
+        /// <summary>
+        /// Preserved for binary/source compatibility with the public API shipped before the
+        /// country-code-aware overload below was introduced. New callers should prefer
+        /// <see cref="ContainsMoreThanOneSlash(PhoneNumber, string)"/>, which matches upstream Java's
+        /// more precise handling of slashes that fall within the country calling code prefix.
+        /// </summary>
         public static bool ContainsMoreThanOneSlash(string candidate)
         {
             var firstSlashIndex = candidate.IndexOf('/');
             return firstSlashIndex > 0 && candidate.IndexOf('/', firstSlashIndex + 1) >= 0;
+        }
+
+        public static bool ContainsMoreThanOneSlash(PhoneNumber number, string candidate)
+        {
+            var firstSlashIndex = candidate.IndexOf('/');
+            if (firstSlashIndex < 0)
+            {
+                // No slashes, this is okay.
+                return false;
+            }
+            var secondSlashIndex = candidate.IndexOf('/', firstSlashIndex + 1);
+            if (secondSlashIndex < 0)
+            {
+                // Only one slash, this is okay.
+                return false;
+            }
+            // If the first slash is after the country calling code, this is permitted.
+            var candidateHasCountryCode =
+                number.CountryCodeSource == PhoneNumber.Types.CountryCodeSource.FROM_NUMBER_WITH_PLUS_SIGN ||
+                number.CountryCodeSource == PhoneNumber.Types.CountryCodeSource.FROM_NUMBER_WITHOUT_PLUS_SIGN;
+            if (candidateHasCountryCode &&
+                PhoneNumberUtil.NormalizeDigitsOnly(candidate.Substring(0, firstSlashIndex)) ==
+                    number.CountryCode.ToString(CultureInfo.InvariantCulture))
+            {
+                // Any more slashes and this is illegal.
+#if NETSTANDARD2_0
+                // netstandard2.0 only has string.Contains(string); net8.0+ prefers Contains(char) (CA1847).
+                return candidate.Substring(secondSlashIndex + 1).Contains("/");
+#else
+                return candidate.Substring(secondSlashIndex + 1).Contains('/');
+#endif
+            }
+            return true;
         }
 
         public static bool ContainsOnlyValidXChars(
@@ -643,8 +696,8 @@ namespace PhoneNumbers
                         // This is the extension sign case, in which the 'x' or 'X' should always precede the
                         // extension number.
                     }
-                    else if (!PhoneNumberUtil.NormalizeDigitsOnly(candidate.Substring(index)).Equals(
-                        number.Extension))
+                    else if (PhoneNumberUtil.NormalizeDigitsOnly(candidate.Substring(index)) !=
+                        number.Extension)
                     {
                         return false;
                     }
@@ -682,14 +735,7 @@ namespace PhoneNumbers
                     // present.
                     return true;
                 }
-                // Remove the first-group symbol.
-                var candidateNationalPrefixRule = formatRule.NationalPrefixFormattingRule;
-                // We assume that the first-group symbol will never be _before_ the national prefix.
-                candidateNationalPrefixRule =
-                    candidateNationalPrefixRule.Substring(0, candidateNationalPrefixRule.IndexOf("${1}", StringComparison.Ordinal));
-                candidateNationalPrefixRule =
-                    PhoneNumberUtil.NormalizeDigitsOnly(candidateNationalPrefixRule);
-                if (candidateNationalPrefixRule.Length == 0)
+                if (PhoneNumberUtil.FormattingRuleHasFirstGroupOnly(formatRule.NationalPrefixFormattingRule))
                 {
                     // National Prefix not needed for this number.
                     return true;
