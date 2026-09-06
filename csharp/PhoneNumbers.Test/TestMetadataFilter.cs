@@ -887,10 +887,63 @@ namespace PhoneNumbers.Test
         }
 
         [Fact]
-        public void TestEquals_WhenNull_ReturnsFalse()
+        public void TestEqualsRejectsNullAndForeignTypesAndAcceptsSameBlacklist()
         {
-            var result = new MetadataFilter(new Dictionary<string, SortedSet<string>>()).Equals(null);
-            Assert.False(result);
+            var filter = new MetadataFilter(new Dictionary<string, SortedSet<string>>());
+
+            // Object.Equals must answer false for a null reference rather than throwing. The null is
+            // held in a variable so the call is a real reference comparison at run time rather than
+            // a literal argument, which reads as a compile-time constant comparison.
+            object? nullReference = null;
+            Assert.False(filter.Equals(nullReference));
+
+            // ... and false for an object that is not a MetadataFilter at all. Held in an object
+            // local for the same reason: passing the string literal straight in is a comparison
+            // between statically incomparable types, which is a real smell everywhere except here.
+            object foreignObject = "not a MetadataFilter";
+            Assert.False(filter.Equals(foreignObject));
+
+            // Equality is by blacklist contents, so a separately built empty filter is equal, and a
+            // filter carrying a non-empty blacklist is not.
+            Assert.True(filter.Equals(MetadataFilter.EmptyFilter()));
+            Assert.False(filter.Equals(MetadataFilter.ForLiteBuild()));
+        }
+
+        [Fact]
+        public void TestGetHashCodeForEmptyBlacklistDoesNotThrow()
+        {
+            // EmptyFilter() has an empty blacklist, and a seedless Aggregate over an empty sequence
+            // throws InvalidOperationException - so this used to throw rather than return a hash.
+            var filter = MetadataFilter.EmptyFilter();
+
+            var exception = Record.Exception(() => filter.GetHashCode());
+
+            Assert.Null(exception);
+        }
+
+        [Fact]
+        public void TestGetHashCodeAgreesWithEqualsForEmptyBlacklists()
+        {
+            var filter = MetadataFilter.EmptyFilter();
+            var same = new MetadataFilter(new Dictionary<string, SortedSet<string>>());
+
+            Assert.True(filter.Equals(same));
+            Assert.Equal(filter.GetHashCode(), same.GetHashCode());
+        }
+
+        [Fact]
+        public void TestGetHashCodeAgreesWithEqualsForNonEmptyBlacklists()
+        {
+            // Two independently built instances whose blacklists have equal content but are not the
+            // same SortedSet<string> instances: SortedSet<T> doesn't override GetHashCode, so hashing
+            // it directly is reference-identity, while Equals above compares with SetEquals - content
+            // equality. That mismatch would let content-equal filters compare equal but hash
+            // differently, which is exactly what ForLiteBuild() produces here on every call.
+            var filter = MetadataFilter.ForLiteBuild();
+            var same = MetadataFilter.ForLiteBuild();
+
+            Assert.True(filter.Equals(same));
+            Assert.Equal(filter.GetHashCode(), same.GetHashCode());
         }
 
         private static PhoneMetadata.Builder FakeArmeniaPhoneMetadata()

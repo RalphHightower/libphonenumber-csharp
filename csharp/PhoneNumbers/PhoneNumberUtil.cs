@@ -1333,7 +1333,7 @@ namespace PhoneNumbers
                     // For non-geographical countries, and Mexican, Chilean, and Uzbek fixed line and mobile
                     // numbers, we output international format for numbers that can be dialed internationally as
                     // that always works.
-                    if (regionCode == REGION_CODE_FOR_NON_GEO_ENTITY
+                    if ((regionCode == REGION_CODE_FOR_NON_GEO_ENTITY
                         // MX fixed line and mobile numbers should always be formatted in international format,
                         // even when dialed within MX. For national format to work, a carrier code needs to be
                         // used, and the correct carrier code depends on if the caller and callee are from the
@@ -1348,7 +1348,7 @@ namespace PhoneNumbers
                         // special codes and to be consistent with formatting across all phone types we return
                         // the number in international format here.
                         || ((regionCode == "MX" || regionCode == "CL"
-                                || regionCode == "UZ") && isFixedLineOrMobile)
+                                || regionCode == "UZ") && isFixedLineOrMobile))
                         && CanBeInternationallyDialled(numberNoExt))
                     {
                         formattedNumber = Format(numberNoExt, PhoneNumberFormat.INTERNATIONAL);
@@ -2604,14 +2604,30 @@ namespace PhoneNumbers
         internal bool MaybeStripNationalPrefixAndCarrierCode(StringBuilder number, string numberString, PhoneMetadata metadata, bool getCarrier, out string carrierCode)
         {
             carrierCode = null;
-            var numberLength = numberString?.Length ?? number?.Length ?? 0;
-            if (numberLength == 0 || !metadata.HasNationalPrefixForParsing)
+            if (!metadata.HasNationalPrefixForParsing)
+            {
+                return false;
+            }
+            // Callers supply either form of the number: the ones that already hold a string pass it
+            // so the StringBuilder need not be materialised, while the public overload passes only
+            // the StringBuilder. Branch on which one was supplied rather than folding both into a
+            // single length, so the ToString() below is reached only when the StringBuilder is the
+            // form that is present.
+            if (numberString is null)
+            {
+                // Early return for numbers of zero length.
+                if (number is null || number.Length == 0)
+                {
+                    return false;
+                }
+                // Attempt to parse the first digits as a national prefix.
+                numberString = number.ToString();
+            }
+            else if (numberString.Length == 0)
             {
                 // Early return for numbers of zero length.
                 return false;
             }
-            // Attempt to parse the first digits as a national prefix.
-            numberString ??= number.ToString();
 
             // Whether the groups are needed at all is known before matching: only a transform rule or
             // a requested carrier code reads them. Without either, the length of the prefix is the
