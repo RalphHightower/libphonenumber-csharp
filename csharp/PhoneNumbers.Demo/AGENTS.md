@@ -120,9 +120,15 @@ Every code change must follow this workflow before the task is considered comple
    ```bash
    dotnet test csharp/PhoneNumbers.Demo.Tests
    ```
-   Don't add `-p:TargetFrameworks=net10.0` here the way the repo-root test command does —
-   this project only ever targets net10.0, so that switch turns it into a cross-targeting
-   outer build that discovers no tests and still exits 0.
+   Don't add `-p:TargetFrameworks=net10.0` here the way the repo-root test command does.
+   This project sets `TargetFramework` (singular) and only ever targets net10.0, and
+   overriding `TargetFrameworks` from the command line stops the `xunit.runner.visualstudio`
+   build assets from being applied, so the test adapter never reaches the output directory —
+   `xunit.runner.reporters.*.dll` and `xunit.runner.utility.*.dll` are simply missing next to
+   the test assembly. The build still succeeds and VSTest still runs, it just has no xunit
+   discoverer to run with, which is what `Make sure that test discoverer & executors are
+   registered` in the output below is reporting. Without the switch the same project reports
+   67 passing tests; with it, zero.
 
    Check the run actually reported a test count regardless. `dotnet test` exits 0 when it
    discovers no tests at all, so output ending in `No test is available in ...` means
