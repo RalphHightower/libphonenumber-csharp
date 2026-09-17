@@ -10,6 +10,10 @@
 # GITHUB_TOKEN - a direct push can never satisfy that (the checks have nothing to run
 # against yet), so GitHub rejects it outright.
 #
+# No open PR: sync, open one with auto-merge off, stop. One already open: regenerate onto the same
+# branch, force-push, turn auto-merge on. See
+# .claude/skills/syncing-upstream-metadata/reference/changelog-and-release-internals.md for why.
+#
 # Exit on any error, treat unset variables as errors, and fail a pipeline if any
 # stage fails. The pipefail matters here: every network read below is `curl | jq`,
 # and without it a failed curl would feed empty input to the parser and the script
@@ -243,14 +247,16 @@ log "target repository is ${GITHUB_REPOSITORY}"
 
 BRANCH="metadata-update/${UPSTREAM_GITHUB_RELEASE_TAG}"
 
-# A later scheduled run can fire before an earlier PR for the same tag has merged (checks
-# take a few minutes) - without this it would open a second, duplicate PR every time.
+# Which half of the flow this run is; an open PR is the only state either half depends on.
+REFRESHING_PR_NUMBER=""
+REFRESHING_PR_NODE_ID=""
 if ! isTrue "${DRY_RUN}"; then
-    EXISTING_PR_COUNT=$(ghApi "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?state=open&head=${GITHUB_REPOSITORY%%/*}:${BRANCH}" \
-        | jq -er 'length')
-    if [ "${EXISTING_PR_COUNT}" -gt 0 ]; then
-        log "a PR for ${UPSTREAM_GITHUB_RELEASE_TAG} is already open, nothing to do"
-        exit 0
+    OPEN_PRS=$(ghApi "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&head=${GITHUB_REPOSITORY%%/*}:${BRANCH}")
+    REFRESHING_PR_NUMBER=$(jq -r '.[0].number // empty' <<<"${OPEN_PRS}")
+    REFRESHING_PR_NODE_ID=$(jq -r '.[0].node_id // empty' <<<"${OPEN_PRS}")
+
+    if [ -n "${REFRESHING_PR_NUMBER}" ]; then
+        log "PR #${REFRESHING_PR_NUMBER} for ${UPSTREAM_GITHUB_RELEASE_TAG} was not merged by hand, so this run regenerates it and enables auto-merge"
     fi
 fi
 
@@ -339,10 +345,32 @@ if isTrue "${DRY_RUN}"; then
     log "  - regenerate resources/locale/country_names.txt with $(java -version 2>&1 | head -n 1 || echo 'the local jdk')"
     log "  - add a CHANGELOG.md entry for ${UPSTREAM_GITHUB_RELEASE_TAG}"
     log "  - commit \"feat: automatic upgrade to ${UPSTREAM_GITHUB_RELEASE_TAG}\" on ${BRANCH} and push it"
-    log "  - open a PR from ${BRANCH} into main and enable auto-merge"
-    log "  - once that PR's required checks pass and it merges, finalize-metadata-release.sh creates release ${UPSTREAM_GITHUB_RELEASE_TAG} and dispatches ${PUBLISH_WORKFLOW}"
+    log "  - open a PR from ${BRANCH} into main for review, leaving auto-merge off"
+    log "  - if nobody merges it, a later run regenerates that branch and enables auto-merge as a backstop"
+    log "  - on merge, finalize-metadata-release.sh creates release ${UPSTREAM_GITHUB_RELEASE_TAG} and dispatches ${PUBLISH_WORKFLOW}"
     exit 0
 fi
+
+# Commit as the account GITHUB_TOKEN belongs to; <id>+<login>@users.noreply.github.com is the form
+# github resolves back to it. Below the dry-run exit (no token there), above anything destructive.
+SYNC_ACCOUNT=$(ghApi "https://api.github.com/user" \
+    | jq -er 'if (.login | type) == "string" and (.id | type) == "number" then "\(.login)\t\(.id)" else error("no login/id") end') \
+    || fail ${EXIT_MISSING_PREREQUISITE} "could not resolve the account GITHUB_TOKEN belongs to, so the sync commit could not be attributed to it"
+
+IFS=$'\t' read -r SYNC_LOGIN SYNC_ID <<<"${SYNC_ACCOUNT}"
+
+# finalize_metadata_release.yml gates the release on this exact login, so a token reissued to
+# another account would sync and merge perfectly and then never release anything.
+RELEASE_BOT_LOGIN="libphonenumber-csharp-bot"
+if [ "${SYNC_LOGIN}" != "${RELEASE_BOT_LOGIN}" ]; then
+    fail ${EXIT_MISSING_PREREQUISITE} "GITHUB_TOKEN belongs to ${SYNC_LOGIN}, but finalize_metadata_release.yml only releases PRs opened by ${RELEASE_BOT_LOGIN} - update that workflow's gate before pointing this at another account"
+fi
+
+METADATA_COMMIT_AUTHOR_NAME="${SYNC_LOGIN}"
+METADATA_COMMIT_AUTHOR_EMAIL="${SYNC_ID}+${SYNC_LOGIN}@users.noreply.github.com"
+# Git author names, not logins, matched in full: dependabot commits as "dependabot[bot]".
+CHANGELOG_FOLD_IGNORED_AUTHORS="${METADATA_COMMIT_AUTHOR_NAME}|dependabot[bot]"
+log "committing as ${METADATA_COMMIT_AUTHOR_NAME} <${METADATA_COMMIT_AUTHOR_EMAIL}>"
 
 rm -rf "${GITHUB_ACTION_WORKING_DIRECTORY:?}/resources"
 mkdir -p "${GITHUB_ACTION_WORKING_DIRECTORY}/resources"
@@ -383,35 +411,60 @@ fi
 # separate PR once the tag exists: the version number is already known here (it's
 # UPSTREAM_GITHUB_RELEASE_TAG itself - this port tracks upstream's version 1:1), so there is
 # nothing to guess. The finalize step (finalize-metadata-release.sh) only tags and releases an
-# existing commit; it can't push a follow-up commit of its own; main's branch-protection ruleset
-# requires a PR for every push, with no bypass for any actor, including this automation's own
-# bot account - the same reason this script opens a PR instead of pushing directly (see the
-# file-level comment above). Doing it here keeps everything in the one PR that already goes
-# through that ruleset.
+# existing commit; it can't push a follow-up commit of its own; and main requires status checks a
+# direct push could never satisfy - the same reason this script opens a PR instead of pushing
+# directly (see the file-level comment above). Doing it here keeps everything in the one PR.
 CHANGELOG_FILE="${GITHUB_ACTION_WORKING_DIRECTORY}/CHANGELOG.md"
 if [ -f "${CHANGELOG_FILE}" ] && grep -qF '<!-- next-entry -->' "${CHANGELOG_FILE}"; then
-    # Every release always includes a metadata sync (that's the only thing that ever cuts a tag),
-    # but some releases also bundle other work merged to `main` in between - a version number alone
-    # doesn't say which. Diff this repo's own history since the last release (not the upstream diff
-    # checked above, which is google/libphonenumber's) against everything but resources/ itself and
-    # this bookkeeping file, so update-changelog.sh can tell whether this release is foldable into a
-    # prior metadata-only run or needs its own standalone entry. Deliberately NOT excluded:
-    # CountryCodeToRegionCodeMap.cs - despite its name, it is hand-maintained (its own header still
-    # says "todo make this file automatically generated"), so a change to it is real, hand-relevant
-    # content, not a mechanical byproduct of this sync. Fetching just the one tag works even from a
-    # shallow checkout: a tree-level `git diff` needs both commits' trees, not a connected history
-    # between them.
+    # Folds into the previous changelog entry when nobody but the bots has landed anything since
+    # the last release; .claude/skills/syncing-upstream-metadata/reference/changelog-and-release-internals.md says why.
     METADATA_ONLY=true
-    if git fetch --quiet --depth=1 origin "refs/tags/v${DEPLOYED_NUGET_TAG}:refs/tags/v${DEPLOYED_NUGET_TAG}" 2>/dev/null \
-        && git rev-parse -q --verify "v${DEPLOYED_NUGET_TAG}" >/dev/null; then
-        NON_METADATA_FILES=$(git diff --name-only "v${DEPLOYED_NUGET_TAG}" HEAD -- . ':!resources' ':!CHANGELOG.md')
-        if [ -n "${NON_METADATA_FILES}" ]; then
+    if isTrue "$(git rev-parse --is-shallow-repository)"; then
+        warn "the checkout is shallow, so the commits since v${DEPLOYED_NUGET_TAG} cannot be read; treating this release as more than a metadata sync"
+        METADATA_ONLY=false
+    elif git rev-parse -q --verify "v${DEPLOYED_NUGET_TAG}" >/dev/null \
+        && git merge-base --is-ancestor "v${DEPLOYED_NUGET_TAG}" HEAD 2>/dev/null; then
+        # Co-authored-by is read as well as the author: a squash merge records only the PR's
+        # author, so a human fix pushed onto a dependabot PR would otherwise fold away.
+        #
+        # Exact full-name lookup, and %h leads so a tab in an author name cannot shift it.
+        SUBSTANTIVE_COMMITS=$(git log --no-merges \
+            --format='%h%x09%an%x1f%(trailers:key=Co-authored-by,valueonly,separator=%x1f)' \
+            "v${DEPLOYED_NUGET_TAG}..HEAD" \
+            | awk -F'\t' -v ignored="${CHANGELOG_FOLD_IGNORED_AUTHORS}" '
+                BEGIN {
+                    count = split(ignored, names, "|")
+                    for (i = 1; i <= count; i++) {
+                        if (names[i] != "") ignore[tolower(names[i])] = 1
+                    }
+                }
+                {
+                    hash = $1
+                    people = substr($0, index($0, "\t") + 1)
+                    total = split(people, who, "\037")
+                    for (i = 1; i <= total; i++) {
+                        name = who[i]
+                        sub(/ *<[^<>]*>$/, "", name)
+                        if (name == "") continue
+                        if (!(tolower(name) in ignore)) {
+                            print hash
+                            next
+                        }
+                    }
+                }')
+
+        if [ -n "${SUBSTANTIVE_COMMITS}" ]; then
             METADATA_ONLY=false
+            log "release includes work beyond the metadata sync:"
+            # One argument per line: printf would consume the format once and indent only the first.
+            while IFS= read -r commit; do
+                [ -n "${commit}" ] && git log --no-walk --format='  %h %s' "${commit}"
+            done <<<"${SUBSTANTIVE_COMMITS}"
         fi
     else
         # Fail closed: better to give this release its own entry than to silently fold real changes
-        # away as if they never happened because the one tag needed to check couldn't be fetched.
-        warn "could not fetch v${DEPLOYED_NUGET_TAG} to check for non-metadata changes since the last release"
+        # away as if they never happened because the history needed to check wasn't there.
+        warn "could not reach v${DEPLOYED_NUGET_TAG} from HEAD to check for work beyond the metadata sync; is the checkout shallow?"
         METADATA_ONLY=false
     fi
 
@@ -423,41 +476,50 @@ fi
 
 git checkout -b "${BRANCH}"
 git add -A
-git -c user.email='<>' -c user.name='libphonenumber-csharp-bot' \
+git -c user.email="${METADATA_COMMIT_AUTHOR_EMAIL}" -c user.name="${METADATA_COMMIT_AUTHOR_NAME}" \
     commit -m "feat: automatic upgrade to ${UPSTREAM_GITHUB_RELEASE_TAG}"
 
-# Force is safe: this branch exists only for this automation's own PRs, nothing else ever
-# develops on it, and a stale remote copy from an earlier failed/closed attempt (the duplicate
-# check above only rules out an *open* PR) should not block a fresh retry.
+# Force is safe: this branch carries nothing but this automation's own PRs, and overwriting it is
+# the point rather than a side effect.
 git push --force origin "HEAD:refs/heads/${BRANCH}"
 
-PR_BODY=$(cat <<EOF
+
+
+if [ -n "${REFRESHING_PR_NUMBER}" ]; then
+    PR_NUMBER="${REFRESHING_PR_NUMBER}"
+    PR_NODE_ID="${REFRESHING_PR_NODE_ID}"
+    log "refreshed PR #${PR_NUMBER} with a newly generated ${UPSTREAM_GITHUB_RELEASE_TAG} sync"
+else
+    PR_BODY=$(cat <<EOF
 Syncs \`resources/\` from [${UPSTREAM_REPOSITORY} ${UPSTREAM_GITHUB_RELEASE_TAG}](https://github.com/${UPSTREAM_REPOSITORY}/releases/tag/${UPSTREAM_GITHUB_RELEASE_TAG}), regenerates \`resources/locale/country_names.txt\`, and records the release in \`CHANGELOG.md\`.
 
-Auto-merges once the required checks pass. On merge, [finalize_metadata_release.yml](.github/workflows/finalize_metadata_release.yml) tags the merge commit, creates the GitHub release, and dispatches the NuGet publish.
+**Review and merge this when you are happy with it** - that is the intended way for a metadata release to ship.
+
+If it is still open at the next daily [create_new_release_on_new_metadata_update.yml](.github/workflows/create_new_release_on_new_metadata_update.yml) run, that run regenerates this branch from ${UPSTREAM_GITHUB_RELEASE_TAG} and turns auto-merge on, so a sync is never left stalled because nobody was around. Don't push fixes to this branch - that regeneration force-pushes over anything else that is there, deliberately: the commit that merges is always one this automation just built.
+
+On merge, [finalize_metadata_release.yml](.github/workflows/finalize_metadata_release.yml) tags the merge commit, creates the GitHub release, and dispatches the NuGet publish.
 EOF
-)
+    )
 
-PR_RESPONSE=$(jq -n --arg title "feat: automatic upgrade to ${UPSTREAM_GITHUB_RELEASE_TAG}" \
-    --arg head "${BRANCH}" --arg base "main" --arg body "${PR_BODY}" \
-    '{title: $title, head: $head, base: $base, body: $body}' \
-    | ghApi -X POST --data @- "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls")
+    PR_RESPONSE=$(jq -n --arg title "feat: automatic upgrade to ${UPSTREAM_GITHUB_RELEASE_TAG}" \
+        --arg head "${BRANCH}" --arg base "main" --arg body "${PR_BODY}" \
+        '{title: $title, head: $head, base: $base, body: $body}' \
+        | ghApi -X POST --data @- "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls")
 
-PR_NUMBER=$(jq -er '.number' <<<"${PR_RESPONSE}")
-PR_NODE_ID=$(jq -er '.node_id' <<<"${PR_RESPONSE}")
-log "opened PR #${PR_NUMBER} for ${UPSTREAM_GITHUB_RELEASE_TAG}"
+    PR_NUMBER=$(jq -er '.number' <<<"${PR_RESPONSE}")
+    PR_NODE_ID=$(jq -er '.node_id' <<<"${PR_RESPONSE}")
+    # Auto-merge stays off: this PR is for a person to read and merge.
+    log "opened PR #${PR_NUMBER} for ${UPSTREAM_GITHUB_RELEASE_TAG} with auto-merge off; a later run arms it if nobody merges it first"
+    exit 0
+fi
 
-# GraphQL errors come back as HTTP 200 with an "errors" field, so --fail above will not
-# catch this - check the body instead. Failing to enable auto-merge (e.g. the repository
-# setting for it is off) is not fatal: the PR is still valid, it just needs a manual merge
-# once checks pass.
-AUTOMERGE_RESPONSE=$(jq -n --arg id "${PR_NODE_ID}" \
-    '{query: "mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: MERGE}) { clientMutationId } }", variables: {id: $id}}' \
-    | ghApi -X POST --data @- "https://api.github.com/graphql")
-
-if jq -e '.errors' <<<"${AUTOMERGE_RESPONSE}" >/dev/null 2>&1; then
-    warn "could not enable auto-merge on PR #${PR_NUMBER}: $(jq -r '.errors[0].message' <<<"${AUTOMERGE_RESPONSE}")"
-    warn "the PR was opened but will need a manual merge once its checks pass"
+# Immediately after the force-push, which is the only moment github accepts it - see armAutoMerge.
+AUTOMERGE_ERROR=$(armAutoMerge "${PR_NODE_ID}")
+if [ -z "${AUTOMERGE_ERROR}" ]; then
+    log "enabled auto-merge on PR #${PR_NUMBER}; it merges once its required checks pass"
 else
-    log "enabled auto-merge on PR #${PR_NUMBER}"
+    # Fatal rather than a warning: this runs daily, so a permanent failure would otherwise loop
+    # silently, burning a build a day on a release that never ships while every run reports green.
+    warn "the PR is still valid, it just needs a merge by hand once its checks pass"
+    fail 1 "could not enable auto-merge on PR #${PR_NUMBER}: ${AUTOMERGE_ERROR}"
 fi
