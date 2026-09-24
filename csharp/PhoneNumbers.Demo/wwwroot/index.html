@@ -7,6 +7,14 @@
     <meta name="description" content="Parse, format, validate and enrich phone numbers in the browser via WebAssembly." />
     <base href="/" />
 
+    <!-- The badge gradient behind the sidebar's phone icon shifts between
+         light/dark theme (see sidebar.css's --accent-2/--accent-solid).
+         favicon.svg matches that via a prefers-color-scheme media query for
+         first paint; phoneDemo.setTheme (below) keeps it in sync with the
+         page's own toggle afterward, which prefers-color-scheme alone can't
+         see. -->
+    <link rel="icon" href="favicon.svg" />
+
     <!-- pre-paint: resolve theme before Blazor mounts to avoid a flash -->
     <script>
         (function () {
@@ -40,6 +48,12 @@
     <link href="css/live-formatter.css" rel="stylesheet" />
     <link href="css/empty-state.css" rel="stylesheet" />
     <link href="css/install-block.css" rel="stylesheet" />
+
+    <!-- Filled in at build/publish (OverrideHtmlAssetPlaceholders in the csproj): the importmap
+         maps the runtime's module names to their fingerprinted files, the preload starts the
+         WebAssembly download early. -->
+    <script type="importmap"></script>
+    <link rel="preload" id="webassembly" />
 </head>
 <body>
     <div id="app">
@@ -57,6 +71,11 @@
 
     <!-- Minimal helpers for theme switching and clipboard (no framework, no deps). -->
     <script>
+        function syncFavicon(theme) {
+            const link = document.querySelector('link[rel="icon"]');
+            if (!link) return;
+            link.href = theme === 'dark' ? 'logo-dark.svg' : 'logo.svg';
+        }
         window.phoneDemo = {
             getTheme: function () {
                 return document.documentElement.getAttribute('data-theme') || 'light';
@@ -65,6 +84,7 @@
                 document.documentElement.setAttribute('data-theme', theme);
                 document.documentElement.style.colorScheme = theme;
                 try { localStorage.setItem('phone-demo-theme', theme); } catch (e) {}
+                syncFavicon(theme);
                 return theme;
             },
             toggleTheme: function () {
@@ -91,8 +111,12 @@
                 return Promise.resolve();
             }
         };
+        // Correct the favicon for a reload where the stored theme differs
+        // from the OS preference favicon.svg's own media query resolved at
+        // first paint (setTheme covers every change from here on).
+        syncFavicon(window.phoneDemo.getTheme());
     </script>
 
-    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
 </body>
 </html>
