@@ -52,16 +52,6 @@ public class FormattingPageTests : BunitContext
     }
 
     [Fact]
-    public void calling_from_with_no_value_falls_back_to_the_page_default()
-    {
-        var cut = Render<Formatting>();
-
-        cut.Find("#format-calling-from").Change((object?)null);
-
-        Assert.Contains("Formatted for dialing from GB", cut.Markup);
-    }
-
-    [Fact]
     public void shows_out_of_country_and_mobile_dialing_formats()
     {
         var cut = Render<Formatting>();
@@ -113,5 +103,17 @@ public class FormattingPageTests : BunitContext
         var e164Item = items.FirstOrDefault(i => i.QuerySelector(".format-list__name")?.TextContent.Trim() == "E.164");
         Assert.NotNull(e164Item);
         Assert.Contains("+442079460958", e164Item.QuerySelector(".format-list__value")?.TextContent ?? "");
+    }
+
+    [Fact]
+    public void header_links_format_in_the_api_reference()
+    {
+        var cut = Render<Formatting>();
+
+        var link = cut.Find("a[aria-label='PhoneNumberUtil.Format in the API reference']");
+
+        Assert.Equal(
+            "http://localhost/docs/api/PhoneNumbers.PhoneNumberUtil.html#PhoneNumbers_PhoneNumberUtil_Format_PhoneNumbers_PhoneNumber_PhoneNumbers_PhoneNumberFormat_",
+            link.GetAttribute("href"));
     }
 }

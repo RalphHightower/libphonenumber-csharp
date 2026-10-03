@@ -20,6 +20,17 @@ public class ParseValidatePageTests : BunitContext
     }
 
     [Fact]
+    public void lower_case_region_in_link_is_upper_cased_in_the_address_bar()
+    {
+        var nav = Services.GetRequiredService<NavigationManager>();
+        nav.NavigateTo("/parse?n=020%207946%200958&r=gb");
+
+        Render<ParseValidate>();
+
+        Assert.EndsWith("&r=GB", nav.Uri);
+    }
+
+    [Fact]
     public void unknown_region_in_link_falls_back_to_the_default_region()
     {
         Services.GetRequiredService<NavigationManager>().NavigateTo("/parse?n=020%207946%200958&r=XX");
@@ -134,5 +145,17 @@ public class ParseValidatePageTests : BunitContext
         var labels = cut.FindAll(".result-grid__label").Select(l => l.TextContent.Trim()).ToList();
         Assert.Contains("Is Valid", labels);
         Assert.Contains("Is Possible", labels);
+    }
+
+    [Fact]
+    public void header_links_parse_in_the_api_reference()
+    {
+        var cut = Render<ParseValidate>();
+
+        var link = cut.Find("a[aria-label='PhoneNumberUtil.Parse in the API reference']");
+
+        Assert.Equal(
+            "http://localhost/docs/api/PhoneNumbers.PhoneNumberUtil.html#PhoneNumbers_PhoneNumberUtil_Parse_System_String_System_String_",
+            link.GetAttribute("href"));
     }
 }
