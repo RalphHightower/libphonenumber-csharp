@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text;
 using Xunit;
 
 namespace PhoneNumbers.Test
@@ -75,6 +77,23 @@ namespace PhoneNumbers.Test
         };
 
         [Fact]
+        public void NationalSignificantNumbersPreserveAllDigitsWithLeadingZeros()
+        {
+            foreach (var nationalNumber in new[] { 0UL, 12345678901UL, ulong.MaxValue })
+            {
+                foreach (var zeros in new[] { 0, 1, 10, 255 })
+                {
+                    var number = PhoneNumber.CreateBuilder().SetCountryCode(39)
+                        .SetNationalNumber(nationalNumber).SetNumberOfLeadingZeros(zeros).Build();
+                    var expected = new string('0', Math.Min(zeros, 10))
+                        + nationalNumber.ToString(CultureInfo.InvariantCulture);
+                    Assert.Equal(expected, PhoneUtil.GetNationalSignificantNumber(number));
+                    Assert.Equal("+39" + expected, PhoneUtil.Format(number, PhoneNumberFormat.E164));
+                }
+            }
+        }
+
+        [Fact]
         public void ParseFailsOnlyWithNumberParseException()
         {
             AssertOverInputs("Parse", input => PhoneUtil.Parse(input, "US"), typeof(NumberParseException));
@@ -107,6 +126,60 @@ namespace PhoneNumbers.Test
                 input => PhoneNumberUtil.NormalizeDiallableCharsOnly(input));
             AssertOverInputs("ConvertAlphaCharactersInNumber",
                 input => PhoneNumberUtil.ConvertAlphaCharactersInNumber(input));
+        }
+
+        [Fact]
+        public void OutOfCountryFormattingAcceptsLongRawInput()
+        {
+            var rawInput = "+1" + new string(' ', 100) + "6502530000";
+            var number = PhoneUtil.ParseAndKeepRawInput(rawInput, RegionCode.US);
+            Assert.True(PhoneUtil.IsValidNumber(number));
+            Assert.Equal("00 1 6502530000",
+                PhoneUtil.FormatOutOfCountryKeepingAlphaChars(number, RegionCode.GB));
+
+            // Builders can supply raw input longer than the parser's input limit, too.
+            number = number.ToBuilder().SetRawInput("+1" + new string(' ', 10_000) + "6502530000").Build();
+            Assert.Equal("00 1 6502530000",
+                PhoneUtil.FormatOutOfCountryKeepingAlphaChars(number, RegionCode.GB));
+        }
+
+        [Fact]
+        public void FormattingPreservesLongExtensions()
+        {
+            foreach (var extension in new[] { 70, 80, 90, 100, 10_000 }
+                         .Select(length => new string('1', length)))
+            {
+                var number = PhoneUtil.Parse("+16502530000", RegionCode.US)
+                    .ToBuilder().SetExtension(extension).Build();
+                Assert.Equal("+1 650-253-0000 ext. " + extension,
+                    PhoneUtil.Format(number, PhoneNumberFormat.INTERNATIONAL));
+                Assert.Equal("(650) 253-0000 ext. " + extension,
+                    PhoneUtil.Format(number, PhoneNumberFormat.NATIONAL));
+                Assert.Equal("tel:+1-650-253-0000;ext=" + extension,
+                    PhoneUtil.Format(number, PhoneNumberFormat.RFC3966));
+                Assert.Equal("+16502530000", PhoneUtil.Format(number, PhoneNumberFormat.E164));
+                Assert.Equal("+1 6502530000 ext. " + extension,
+                    PhoneUtil.FormatByPattern(number, PhoneNumberFormat.INTERNATIONAL, new List<NumberFormat>()));
+                Assert.Equal("(650) 253-0000 ext. " + extension,
+                    PhoneUtil.FormatNationalNumberWithCarrierCode(number, ""));
+                Assert.Equal("00 1 650-253-0000 ext. " + extension,
+                    PhoneUtil.FormatOutOfCountryCallingNumber(number, RegionCode.GB));
+                Assert.Equal("1 (650) 253-0000 ext. " + extension,
+                    PhoneUtil.FormatOutOfCountryCallingNumber(number, RegionCode.US));
+            }
+        }
+
+        [Fact]
+        public void FormattingAcceptsLongCustomPatterns()
+        {
+            var number = PhoneUtil.Parse("+16502530000", RegionCode.US);
+            var padding = new string(' ', 100);
+            var formats = new List<NumberFormat>
+            {
+                NumberFormat.CreateBuilder().SetPattern("(\\d{10})").SetFormat(padding + "$1").Build()
+            };
+            Assert.Equal("+1 " + padding + "6502530000",
+                PhoneUtil.FormatByPattern(number, PhoneNumberFormat.INTERNATIONAL, formats));
         }
 
         [Fact]
@@ -197,6 +270,44 @@ namespace PhoneNumbers.Test
             }
 
             Assert.Empty(failures);
+        }
+
+        [Fact]
+        public void DigitNormalizationIgnoresNonDecimalNumericCharacters()
+        {
+            // Java's Character.digit(c, 10) accepts decimal digits, not numeric values such as
+            // Tamil hundred, fractions, Roman numerals, superscripts or circled numbers.
+            var buffer = new StringBuilder();
+            foreach (var numeric in new[] { '\u0bf1', '\u00bd', '\u2167', '\u00b2', '\u246b', '\u0f33' })
+            {
+                foreach (var padding in new[] { "", new string('1', 300) })
+                {
+                    var input = padding + numeric + "123";
+                    Assert.Equal(padding + "123", PhoneNumberUtil.NormalizeDigitsOnly(input));
+                    Assert.Equal(padding + "123", PhoneNumberUtil.Normalize(input));
+                    buffer.Clear().Append(input);
+                    Assert.Equal(padding + "123",
+                        PhoneNumberUtil.NormalizeDigits(buffer, false).ToString());
+                    buffer.Clear().Append(input);
+                    Assert.Equal(input,
+                        PhoneNumberUtil.NormalizeDigits(buffer, true).ToString());
+                }
+            }
+        }
+
+        [Fact]
+        public void DigitNormalizationPreservesUnicodeDecimalDigits()
+        {
+            const string digits = "\u0661\u0662\u0663\u096a\u096b\u096c\uff17\uff18\uff19";
+            var buffer = new StringBuilder();
+            foreach (var padding in new[] { "", new string('1', 300) })
+            {
+                Assert.Equal(padding + "123456789", PhoneNumberUtil.NormalizeDigitsOnly(padding + digits));
+                Assert.Equal(padding + "123456789", PhoneNumberUtil.Normalize(padding + digits));
+                buffer.Clear().Append(padding).Append(digits);
+                Assert.Equal(padding + "123456789",
+                    PhoneNumberUtil.NormalizeDigits(buffer, true).ToString());
+            }
         }
 
         private static void AssertOverInputs(string what, Func<string, object> call, Type? allowed = null)
