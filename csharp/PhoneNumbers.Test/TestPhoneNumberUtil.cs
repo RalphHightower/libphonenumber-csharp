@@ -1059,6 +1059,28 @@ namespace PhoneNumbers.Test
             Assert.Equal("+80012345678", phoneUtil.Format(InternationalTollFree, PhoneNumberFormat.E164));
         }
 
+        [Theory]
+        [InlineData(-1, "+-1123")]
+        [InlineData(-44, "+-44123")]
+        [InlineData(int.MinValue, "+-2147483648123")]
+        [InlineData(0, "+0123")]
+        [InlineData(int.MaxValue, "+2147483647123")]
+        public void TestFormatE164NumberWithInvalidCountryCode(int countryCode, string expected)
+        {
+            // Java's E164 early exit preserves even invalid country calling codes.
+            var number = new PhoneNumber.Builder().SetCountryCode(countryCode)
+                .SetNationalNumber(123).SetExtension("456").Build();
+            Assert.Equal(expected, phoneUtil.Format(number, PhoneNumberFormat.E164));
+
+            var formattedNumber = new StringBuilder("previous contents");
+            phoneUtil.Format(number, PhoneNumberFormat.E164, formattedNumber);
+            Assert.Equal(expected, formattedNumber.ToString());
+
+            Assert.Equal("123", phoneUtil.Format(number, PhoneNumberFormat.NATIONAL));
+            Assert.Equal("123", phoneUtil.Format(number, PhoneNumberFormat.INTERNATIONAL));
+            Assert.Equal("123", phoneUtil.Format(number, PhoneNumberFormat.RFC3966));
+        }
+
         [Fact]
         public void TestFormatAuShortCodeNumber()
         {
@@ -1871,6 +1893,56 @@ namespace PhoneNumbers.Test
         }
 
         [Fact]
+        public void TestIsViablePhoneNumberRequiresWholeInput()
+        {
+            // Java's Matcher.matches() requires the entire input, including any extension.
+            foreach (var number in new[] { "12", "123", "+6433316005", "1800FLOWERS", "123 ext. 4", "123;ext=4" })
+            {
+                Assert.True(PhoneNumberUtil.IsViablePhoneNumber(number));
+                foreach (var ending in new[] { "\n", "\r", "\r\n", "\u0085", "\u2028", "\u2029", "\0" })
+                    Assert.False(PhoneNumberUtil.IsViablePhoneNumber(number + ending), number + ending);
+            }
+        }
+
+        [Fact]
+        public void TestIsAlphaNumberRejectsTrailingLineFeed()
+        {
+            Assert.True(phoneUtil.IsAlphaNumber("1800FLOWERS"));
+            Assert.False(phoneUtil.IsAlphaNumber("1800FLOWERS\n"));
+            Assert.True(phoneUtil.IsAlphaNumber("1800FLOWERS ext. 123"));
+            Assert.False(phoneUtil.IsAlphaNumber("1800FLOWERS ext. 123\n"));
+        }
+
+        [Fact]
+        public void TestParseRejectsLineFeedBeforeRfc3966Parameters()
+        {
+            foreach (var number in new[]
+            {
+                "tel:033316005\n;phone-context=abc.nz",
+                "tel:033316005\n;phone-context=+64",
+                "tel:033316005 ext. 123\n;phone-context=abc.nz",
+                "tel:033316005;ext=123\n;phone-context=+64",
+                "+6433316005\n;isub=123",
+                "+6433316005 ext. 123\n;isub=123"
+            })
+            {
+                foreach (var region in new[] { RegionCode.NZ, RegionCode.ZZ })
+                {
+                    Assert.Equal(ErrorType.NOT_A_NUMBER,
+                        Assert.Throws<NumberParseException>(() => phoneUtil.Parse(number, region)).ErrorType);
+                    Assert.Equal(ErrorType.NOT_A_NUMBER,
+                        Assert.Throws<NumberParseException>(() => phoneUtil.ParseAndKeepRawInput(number, region)).ErrorType);
+                }
+            }
+
+            // Extraction still trims ordinary trailing punctuation before checking viability.
+            Assert.Equal(NZNumber, phoneUtil.Parse("+6433316005\n", RegionCode.NZ));
+            Assert.Equal(NZNumber, phoneUtil.Parse("tel:033316005;phone-context=+64", RegionCode.NZ));
+            Assert.Equal(Update(NZNumber).SetExtension("123").Build(),
+                phoneUtil.Parse("tel:033316005;ext=123;phone-context=+64", RegionCode.NZ));
+        }
+
+        [Fact]
         public void TestIsViablePhoneNumberNonAscii()
         {
             // Only one or two digits before possible punctuation followed by more digits.
@@ -2208,6 +2280,10 @@ namespace PhoneNumbers.Test
             Assert.Equal(NZNumber, phoneUtil.Parse("+01164 3 331 6005", RegionCode.US));
             Assert.Equal(NZNumber, phoneUtil.Parse("+0064 3 331 6005", RegionCode.NZ));
             Assert.Equal(NZNumber, phoneUtil.Parse("+ 00 64 3 331 6005", RegionCode.NZ));
+            // The retry drops every leading plus sign, not only the first one, as upstream does.
+            Assert.Equal(NZNumber, phoneUtil.Parse("++01164 3 331 6005", RegionCode.US));
+            Assert.Equal(NZNumber, phoneUtil.Parse("++0064 3 331 6005", RegionCode.NZ));
+            Assert.Equal(NZNumber, phoneUtil.Parse("\uFF0B+0064 3 331 6005", RegionCode.NZ));
 
             Assert.Equal(USLocalNumber,
                 phoneUtil.Parse("tel:253-0000;phone-context=www.google.com", RegionCode.US));
@@ -2672,6 +2748,105 @@ namespace PhoneNumbers.Test
                 .SetNumberOfLeadingZeros(3)
                 .Build();
             Assert.Equal(threeZeros, phoneUtil.Parse("0000", RegionCode.AU));
+        }
+
+        [Fact]
+        public void TestParseWithPhoneContext()
+        {
+            // Ported from PhoneNumberUtilTest.testParseWithPhoneContext.
+            Assert.Equal(NZNumber, phoneUtil.Parse("tel:033316005;phone-context=+64", RegionCode.ZZ));
+            Assert.Equal(NZNumber, phoneUtil.Parse(
+                "tel:033316005;phone-context=+64;{this isn't part of phone-context anymore!}", RegionCode.ZZ));
+            Assert.Equal(new PhoneNumber.Builder().SetCountryCode(64).SetNationalNumber(3033316005L).Build(),
+                phoneUtil.Parse("tel:033316005;phone-context=+64-3", RegionCode.ZZ));
+            Assert.Equal(new PhoneNumber.Builder().SetCountryCode(55).SetNationalNumber(5033316005L).Build(),
+                phoneUtil.Parse("tel:033316005;phone-context=+(555)", RegionCode.ZZ));
+            Assert.Equal(new PhoneNumber.Builder().SetCountryCode(1).SetNationalNumber(23033316005L).Build(),
+                phoneUtil.Parse("tel:033316005;phone-context=+-1-2.3()", RegionCode.ZZ));
+
+            foreach (var domain in new[] { "abc.nz", "www.PHONE-numb3r.com", "a", "3phone.J.", "a--z" })
+                Assert.Equal(NZNumber, phoneUtil.Parse("tel:033316005;phone-context=" + domain, RegionCode.NZ));
+
+            foreach (var context in new[] { "", "+", "64", "++64", "+abc", ".", "3phone", "a-.nz", "a{b}c" })
+                VerifyFailure("tel:033316005;phone-context=" + context, RegionCode.ZZ, ErrorType.NOT_A_NUMBER);
+        }
+
+        [Theory]
+        [InlineData("foo-bar.com")]
+        [InlineData("foo--bar.com")]
+        [InlineData("foo-bar-baz.com")]
+        [InlineData("a-bc.nz")]
+        [InlineData("a-b1.nz")]
+        [InlineData("1-23.nz")]
+        [InlineData("xn--bcher-kva.example")]
+        [InlineData("foo-bar.baz-quux.nz")]
+        [InlineData("foo-bar.nz.")]
+        [InlineData("foo-bar")]
+        [InlineData("foo-b.nz")]
+        [InlineData("foobar.nz")]
+        public void TestParseWithPhoneContextHyphenatedDomain(string domain)
+        {
+            var input = "tel:033316005;phone-context=" + domain;
+            Assert.Equal(NZNumber, phoneUtil.Parse(input, RegionCode.NZ));
+            var withRawInput = phoneUtil.ParseAndKeepRawInput(input, RegionCode.NZ);
+            Assert.Equal(input, withRawInput.RawInput);
+            Assert.Equal(NZNumber.CountryCode, withRawInput.CountryCode);
+            Assert.Equal(NZNumber.NationalNumber, withRawInput.NationalNumber);
+            Assert.Equal(NZNumber, phoneUtil.Parse(input + ";isub=123", RegionCode.NZ));
+            // A domain context supplies no country calling code.
+            VerifyFailure(input, RegionCode.ZZ, ErrorType.INVALID_COUNTRY_CODE);
+        }
+
+        [Theory]
+        [InlineData("-foo-bar.nz")]
+        [InlineData("foo-bar-.nz")]
+        [InlineData("foo-bar..nz")]
+        [InlineData("foo-bar.123")]
+        [InlineData("foo-bar.nz..")]
+        [InlineData("foo-!bar.nz")]
+        [InlineData("foo-bar.nz\n")]
+        [InlineData("abc.nz\n")]
+        [InlineData("foo-b.nz\n")]
+        public void TestParseWithPhoneContextInvalidHyphenatedDomain(string domain)
+        {
+            var input = "tel:033316005;phone-context=" + domain;
+            VerifyFailure(input, RegionCode.NZ, ErrorType.NOT_A_NUMBER);
+            var error = Assert.Throws<NumberParseException>(() => phoneUtil.ParseAndKeepRawInput(input, RegionCode.NZ));
+            Assert.Equal(ErrorType.NOT_A_NUMBER, error.ErrorType);
+        }
+
+        [Fact]
+        public void TestParseRFC3966PhoneContextDomainname()
+        {
+            // Ported from PhoneNumberUtilTest.testParseRFC3966PhoneContextDomainname (upstream v9.0.44).
+            // Domain phone-contexts keep parsing, including labels with single or repeated hyphens.
+            Assert.Equal(USLocalNumber, phoneUtil.Parse("tel:253-0000;phone-context=www.google.com", RegionCode.US));
+            Assert.Equal(USLocalNumber, phoneUtil.Parse("tel:253-0000;phone-context=ex--ample.domain.com", RegionCode.US));
+
+            // A long ambiguous domain is rejected. The old label pattern ([alnum]+((\-)*[alnum])*) made
+            // backtracking engines spend minutes on this input; this pins the rejection.
+            var evilContext = new StringBuilder(100);
+            for (var i = 0; i < 25; i++)
+                evilContext.Append("aa.");
+            evilContext.Append("aa!");
+            Assert.Throws<NumberParseException>(() =>
+                phoneUtil.Parse("tel:253-0000;phone-context=" + evilContext, RegionCode.US));
+
+            // The rewritten label matches alnum runs separated by one or more hyphens, but not labels
+            // with leading/trailing hyphens or empty labels. Java asserts these against
+            // RFC3966_DOMAINNAME_PATTERN directly; the C# pattern is private, so go through Parse.
+            foreach (var domain in new[] { "a.b.c", "ab-cd.ef", "a--b.c", "example.com." })
+                Assert.Equal(USLocalNumber, phoneUtil.Parse("tel:253-0000;phone-context=" + domain, RegionCode.US));
+            foreach (var domain in new[] { "aa.bb-", "aa..bb", "-aa.bb", "a-.b" })
+                VerifyFailure("tel:253-0000;phone-context=" + domain, RegionCode.US, ErrorType.NOT_A_NUMBER);
+
+            // Valid top-level labels containing digits and hyphens (including Punycode TLDs).
+            foreach (var domain in new[] { "example.c1", "example.b2b", "sub.example.a1-b2", "example.xn--p1ai", "a.b", "www.google.com." })
+                Assert.Equal(USLocalNumber, phoneUtil.Parse("tel:253-0000;phone-context=" + domain, RegionCode.US));
+
+            // Top-level labels starting with or consisting solely of digits must be rejected.
+            foreach (var domain in new[] { "example.123", "example.1a", "example.-c1", "example.c1-" })
+                VerifyFailure("tel:253-0000;phone-context=" + domain, RegionCode.US, ErrorType.NOT_A_NUMBER);
         }
 
         [Fact]

@@ -229,17 +229,19 @@ namespace PhoneNumbers
         private const string DEFAULT_EXTN_PREFIX = " ext. ";
 
         private const string ALPHANUM = VALID_ALPHA + "\\d";
-        private const string RFC3966_DOMAINLABEL = "(?>[" + ALPHANUM + "]+)(?>(-+[" + ALPHANUM + "])*)";
-        private const string RFC3966_TOPLABEL = "(?>[" + VALID_ALPHA + "]+)(?>(-*[" + ALPHANUM + "])*)";
+        // Each hyphen run must be followed by a whole alphanumeric run, as in upstream v9.0.44, so a label can
+        // be split only one way and a failing match cannot backtrack catastrophically (google/libphonenumber#4070).
+        private const string RFC3966_DOMAINLABEL = "(?>[" + ALPHANUM + "]+)(?>(-+[" + ALPHANUM + "]+)*)";
+        private const string RFC3966_TOPLABEL = "(?>[" + VALID_ALPHA + "][" + ALPHANUM + "]*)(?>(-+[" + ALPHANUM + "]+)*)";
 
         // Regular expression of valid global-number-digits or domainname for the phone-context parameter, following the syntax defined in RFC3966.
 #if NET7_0_OR_GREATER
-        [GeneratedRegex(@"^(\+[-.()]*\d[\d-.()]*$|(?>(" + RFC3966_DOMAINLABEL + "\\.(?!$))*)" + RFC3966_TOPLABEL + "\\.?$)", InternalRegexOptions.Default | RegexOptions.ExplicitCapture)]
+        [GeneratedRegex(@"^(\+[-.()]*\d[\d-.()]*\z|(?>(" + RFC3966_DOMAINLABEL + "\\.(?!\\z))*)" + RFC3966_TOPLABEL + "\\.?\\z)", InternalRegexOptions.Default | RegexOptions.ExplicitCapture)]
         private static partial Regex RFC3966_GLOBAL_NUMBER_DIGITS_OR_DOMAINNAME();
 #else
         // RFC3966_DOMAINLABEL is matched non-atomically on older platforms due to bugs in the regex engine.
         private static readonly Regex _RFC3966_GLOBAL_NUMBER_DIGITS_OR_DOMAINNAME
-            = new(@"^(\+[-.()]*\d[\d-.()]*$|(" + RFC3966_DOMAINLABEL + "\\.)*" + RFC3966_TOPLABEL + "\\.?$)", InternalRegexOptions.Default | RegexOptions.ExplicitCapture);
+            = new(@"^(\+[-.()]*\d[\d-.()]*\z|(" + RFC3966_DOMAINLABEL + "\\.)*" + RFC3966_TOPLABEL + "\\.?\\z)", InternalRegexOptions.Default | RegexOptions.ExplicitCapture);
         private static Regex RFC3966_GLOBAL_NUMBER_DIGITS_OR_DOMAINNAME() => _RFC3966_GLOBAL_NUMBER_DIGITS_OR_DOMAINNAME;
 #endif
 
@@ -364,9 +366,10 @@ namespace PhoneNumbers
 
         // We append optionally the extension pattern to the end here, as a valid phone number may
         // have an extension prefix appended, followed by 1 or more digits.
+        // Java uses Matcher.matches(); require the true end of input rather than matching before a final LF.
         private const string ValidPhoneNumberPattern = "^(\\d{2}$|" +
             "[" + PLUS_CHARS + "]*([" + VALID_PUNCTUATION + STAR_SIGN + "]*\\d){3}[" +
-            VALID_PUNCTUATION + STAR_SIGN + VALID_ALPHA + "\\d]*($|" + ExtnPatternsForParsing + "))";
+            VALID_PUNCTUATION + STAR_SIGN + VALID_ALPHA + "\\d]*($|" + ExtnPatternsForParsing + "))\\z";
 #if NET7_0_OR_GREATER
         [GeneratedRegex(ValidPhoneNumberPattern, InternalRegexOptions.Default | RegexOptions.IgnoreCase | RegexOptions.ExplicitCapture)]
         internal static partial Regex ValidPhoneNumber();
@@ -798,11 +801,11 @@ namespace PhoneNumbers
         /// <returns>the length of area code of the PhoneNumber object passed in</returns>
         public int GetLengthOfGeographicalAreaCode(PhoneNumber number)
         {
-            var regionCode = GetRegionCodeForNumber(number);
+            var regionCode = GetRegionCodeForNumber(number, out var nationalSignificantNumber);
             if (!IsValidRegionCode(regionCode))
                 return 0;
 
-            var type = GetNumberType(number);
+            var type = GetNumberType(number, regionCode, nationalSignificantNumber);
             var countryCallingCode = number.CountryCode;
             var metadata = GetMetadataForRegion(regionCode);
             // If a country doesn't use a national prefix, and this number doesn't have an Italian leading
@@ -1766,12 +1769,18 @@ namespace PhoneNumbers
         /// <returns>The type of the phone number.</returns>
         public PhoneNumberType GetNumberType(PhoneNumber number)
         {
-            var regionCode = GetRegionCodeForNumber(number);
+            var regionCode = GetRegionCodeForNumber(number, out var nationalSignificantNumber);
+            return GetNumberType(number, regionCode, nationalSignificantNumber);
+        }
+
+        // Same as the public overload, for a caller that has already resolved the region, and possibly
+        // the national significant number with it (null if not).
+        private PhoneNumberType GetNumberType(PhoneNumber number, string regionCode, string nationalSignificantNumber)
+        {
             if (!IsValidRegionCode(regionCode) && regionCode != REGION_CODE_FOR_NON_GEO_ENTITY)
                 return PhoneNumberType.UNKNOWN;
-            var nationalSignificantNumber = GetNationalSignificantNumber(number);
             var metadata = GetMetadataForRegionOrCallingCode(number.CountryCode, regionCode);
-            return GetNumberTypeHelper(nationalSignificantNumber, metadata);
+            return GetNumberTypeHelper(nationalSignificantNumber ?? GetNationalSignificantNumber(number), metadata);
         }
 
         private PhoneNumberType GetNumberTypeHelper(string nationalNumber, PhoneMetadata metadata)
@@ -1850,26 +1859,7 @@ namespace PhoneNumbers
         /// <returns>A bool that indicates whether the number is of a valid pattern.</returns>
         public bool IsValidNumber(PhoneNumber number)
         {
-            if (number is null)
-                throw new ArgumentNullException(nameof(number));
-            // Inlined to share the national significant number string between region lookup and
-            // validation in the case where the country calling code maps to multiple regions
-            // (e.g. NANPA). For single-region calling codes the NSN is only computed once anyway.
-            countryCallingCodeToRegionCodeMap.TryGetValue(number.CountryCode, out var regions);
-            if (regions is null)
-                return IsValidNumberForRegion(number, null, null);
-
-            string regionCode;
-            string nationalSignificantNumber = null;
-            if (regions.Count == 1)
-            {
-                regionCode = regions[0];
-            }
-            else
-            {
-                nationalSignificantNumber = GetNationalSignificantNumber(number);
-                regionCode = GetRegionCodeForNumberFromRegionList(number, regions, nationalSignificantNumber);
-            }
+            var regionCode = GetRegionCodeForNumber(number, out var nationalSignificantNumber);
             return IsValidNumberForRegion(number, regionCode, nationalSignificantNumber);
         }
 
@@ -1920,21 +1910,28 @@ namespace PhoneNumbers
         /// <param name="number">The phone number whose origin we want to know.</param>
         /// <returns>The region where the phone number is from, or null if no region matches this calling
         /// code.</returns>
-        public string GetRegionCodeForNumber(PhoneNumber number)
+        public string GetRegionCodeForNumber(PhoneNumber number) => GetRegionCodeForNumber(number, out _);
+
+        // Telling a calling code shared by several regions (NANPA, +7, +39, ...) apart needs the national
+        // significant number, so it is handed back for the caller to reuse rather than build again. Null
+        // when the calling code has a single region, or none, and the lookup did not need it.
+        private string GetRegionCodeForNumber(PhoneNumber number, out string nationalSignificantNumber)
         {
             if (number is null)
                 throw new ArgumentNullException(nameof(number));
+            nationalSignificantNumber = null;
             countryCallingCodeToRegionCodeMap.TryGetValue(number.CountryCode, out List<string> regions);
             if (regions is null)
             {
                 return null;
             }
-            return regions.Count == 1 ? regions[0] : GetRegionCodeForNumberFromRegionList(number, regions);
+            if (regions.Count == 1)
+            {
+                return regions[0];
+            }
+            nationalSignificantNumber = GetNationalSignificantNumber(number);
+            return GetRegionCodeForNumberFromRegionList(number, regions, nationalSignificantNumber);
         }
-
-        private string GetRegionCodeForNumberFromRegionList(PhoneNumber number,
-            List<string> regionCodes)
-            => GetRegionCodeForNumberFromRegionList(number, regionCodes, GetNationalSignificantNumber(number));
 
         private string GetRegionCodeForNumberFromRegionList(PhoneNumber number,
             List<string> regionCodes, string nationalNumber)
@@ -2907,11 +2904,14 @@ namespace PhoneNumbers
             }
             catch (NumberParseException e) when (e.ErrorType == ErrorType.INVALID_COUNTRY_CODE)
             {
-                if (IsPlusChar(nationalNumberString[0]))
+                var plusChars = 0;
+                while (plusChars < nationalNumberString.Length && IsPlusChar(nationalNumberString[plusChars]))
+                    plusChars++;
+                if (plusChars > 0)
                 {
-                    // Strip the plus-char, and try again.
+                    // Strip the plus-chars, and try again.
                     countryCode = MaybeExtractCountryCode(
-                        nationalNumberString.Substring(1),
+                        nationalNumberString.Substring(plusChars),
                         regionMetadata, normalizedNationalNumber,
                         keepRawInput, phoneNumber);
                     if (countryCode == 0)
@@ -3285,13 +3285,13 @@ namespace PhoneNumbers
         /// <returns></returns>
         public bool CanBeInternationallyDialled(PhoneNumber number)
         {
-            var regionCode = GetRegionCodeForNumber(number);
+            var regionCode = GetRegionCodeForNumber(number, out var nationalSignificantNumber);
             if (!IsValidRegionCode(regionCode))
                 // Note numbers belonging to non-geographical entities (e.g. +800 numbers) are always
                 // internationally diallable, and will be caught here.
                 return true;
             var metadata = GetMetadataForRegion(regionCode);
-            var nationalSignificantNumber = GetNationalSignificantNumber(number);
+            nationalSignificantNumber ??= GetNationalSignificantNumber(number);
             return !IsNumberMatchingDesc(nationalSignificantNumber, metadata.NoInternationalDialling);
         }
 
